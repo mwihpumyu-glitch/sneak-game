@@ -1,0 +1,337 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Snake Arena</title>
+    <style>
+        body { margin:0; background:#1a2b1a; overflow:hidden; font-family: 'Segoe UI', sans-serif; color: #fff; }
+        canvas { display:block; }
+        
+        /* HUD - Top Left */
+        #hud {
+            position: absolute; top: 10px; left: 10px; 
+            background: rgba(0,0,0,0.6); padding: 15px; border-radius: 8px;
+            font-size: 14px; border: 1px solid rgba(255,255,255,0.2); display: none;
+            pointer-events: none; min-width: 150px; z-index: 5;
+        }
+
+        .status-effect { color: #4ae24a; font-weight: bold; margin-top: 5px; font-size: 12px; }
+
+        /* Overlay Screens */
+        .overlay-screen {
+            position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+            background: radial-gradient(circle, rgba(20,40,20,0.95) 0%, rgba(0,0,0,1) 100%);
+            display: flex; flex-direction: column; align-items: center; justify-content: center;
+            z-index: 10; text-align: center;
+        }
+
+        h1 { font-size: 70px; margin: 0; color: #4ae24a; text-shadow: 0 0 30px rgba(74,226,74,0.5); }
+        p { color: #a0ffa0; letter-spacing: 3px; margin-bottom: 30px; }
+
+        .btn-action {
+            padding: 20px 60px; font-size: 24px; font-family: inherit;
+            background: #4ae24a; color: #000; border: none; border-radius: 50px;
+            cursor: pointer; transition: 0.3s; font-weight: bold;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.4);
+        }
+
+        .btn-action:hover { transform: scale(1.1); background: #fff; box-shadow: 0 0 30px #4ae24a; }
+        
+        #finalScoreContainer { font-size: 28px; margin: 20px 0; color: #fff; }
+    </style>
+</head>
+<body>
+
+<div id="startScreen" class="overlay-screen">
+    <h1>SNAKE.IO</h1>
+    <p>PREDATOR PROTOCOL v2.0</p>
+    <button class="btn-action" onclick="startGame()">START MISSION</button>
+</div>
+
+<div id="gameOverScreen" class="overlay-screen" style="display: none;">
+    <h1 style="color: #ff4a4a; text-shadow: 0 0 30px rgba(255,74,74,0.5);">TERMINATED</h1>
+    <div id="finalScoreContainer">MASS COLLECTED: <span id="finalScore" style="color:#4ae24a">0</span></div>
+    <button class="btn-action" style="background: #ff4a4a;" onclick="startGame()">RESPAWN & REVENGE</button>
+</div>
+
+<div id="hud">
+    <div style="font-size: 18px; border-bottom: 1px solid #444; padding-bottom: 5px;">SCORE: <span id="score" style="color:#4ae24a">0</span></div>
+    <div id="powerupStatus" class="status-effect"></div>
+</div>
+
+<canvas id="gameCanvas"></canvas>
+
+<script>
+/** * GAME CONSTANTS 
+ */
+const CONFIG = {
+    WORLD_SIZE: 3500,
+    MAX_FOOD: 400,
+    BOT_COUNT: 18,
+    INITIAL_LENGTH: 25,
+    FOOD_TYPES: ['🍎', '🍌', '🍇', '🍒', '🍕', '🍩', '🍰', '🍭', '🍔'],
+    SPECIAL_TYPES: [
+        { icon: '🧲', type: 'MAGNET', color: '#00ffff' },
+        { icon: '🛡️', type: 'SHIELD', color: '#ffea00' }
+    ]
+};
+
+const canvas = document.getElementById("gameCanvas");
+const ctx = canvas.getContext("2d");
+let player, worms = [], food = [], specialFood = [], camera = {x:0, y:0};
+let mouse = {x:0, y:0, worldX:0, worldY:0, down: false};
+let gameRunning = false;
+
+/**
+ * WORM CLASS (Uniform Size & Big Eyes)
+ */
+class Worm {
+    constructor(x, y, color, name, isBot) {
+        this.name = name;
+        this.color = color;
+        this.isBot = isBot;
+        this.segments = [];
+        for(let i=0; i<CONFIG.INITIAL_LENGTH; i++) this.segments.push({x, y});
+        
+        this.angle = Math.random() * Math.PI * 2;
+        this.score = 0;
+        this.speed = 3;
+        this.magnetTimer = 0;
+        this.shieldTimer = 0;
+    }
+
+    update() {
+        let head = this.segments[0];
+        if (this.magnetTimer > 0) this.magnetTimer--;
+        if (this.shieldTimer > 0) this.shieldTimer--;
+
+        if (this.isBot) {
+            if (Math.random() < 0.02) this.angle += (Math.random() - 0.5);
+        } else {
+            let targetAngle = Math.atan2(mouse.worldY - head.y, mouse.worldX - head.x);
+            let diff = targetAngle - this.angle;
+            while (diff < -Math.PI) diff += Math.PI * 2;
+            while (diff > Math.PI) diff -= Math.PI * 2;
+            this.angle += diff * 0.15;
+            this.speed = mouse.down ? 7 : 3;
+        }
+
+        let nextX = head.x + Math.cos(this.angle) * this.speed;
+        let nextY = head.y + Math.sin(this.angle) * this.speed;
+        
+        // Fence Boundary Logic
+        if (nextX < 0) nextX = 0;
+        if (nextX > CONFIG.WORLD_SIZE) nextX = CONFIG.WORLD_SIZE;
+        if (nextY < 0) nextY = 0;
+        if (nextY > CONFIG.WORLD_SIZE) nextY = CONFIG.WORLD_SIZE;
+
+        this.segments.unshift({x: nextX, y: nextY});
+        this.segments.pop();
+    }
+
+    draw() {
+        ctx.save();
+        if (this.shieldTimer > 0) {
+            ctx.shadowBlur = 20;
+            ctx.shadowColor = "#ffea00";
+        }
+
+        let currentSize = 15 + (this.score / 120);
+        if (currentSize > 45) currentSize = 45;
+
+        this.segments.forEach((s, i) => {
+            let pos = toScreen(s.x, s.y);
+            ctx.fillStyle = this.color;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, currentSize, 0, Math.PI*2);
+            ctx.fill();
+
+            if (i === 0) { // Big Eye Logic
+                ctx.fillStyle = "white";
+                let lx = pos.x + Math.cos(this.angle - 0.6) * (currentSize * 0.7);
+                let ly = pos.y + Math.sin(this.angle - 0.6) * (currentSize * 0.7);
+                ctx.beginPath(); ctx.arc(lx, ly, currentSize * 0.5, 0, Math.PI*2); ctx.fill();
+
+                let rx = pos.x + Math.cos(this.angle + 0.6) * (currentSize * 0.7);
+                let ry = pos.y + Math.sin(this.angle + 0.6) * (currentSize * 0.7);
+                ctx.beginPath(); ctx.arc(rx, ry, currentSize * 0.5, 0, Math.PI*2); ctx.fill();
+
+                ctx.fillStyle = "black";
+                ctx.beginPath();
+                ctx.arc(lx + Math.cos(this.angle)*2, ly + Math.sin(this.angle)*2, currentSize*0.2, 0, Math.PI*2);
+                ctx.arc(rx + Math.cos(this.angle)*2, ry + Math.sin(this.angle)*2, currentSize*0.2, 0, Math.PI*2);
+                ctx.fill();
+            }
+        });
+        ctx.restore();
+    }
+
+    die() {
+        if (this.shieldTimer > 0) return;
+        this.segments.forEach((s, idx) => { if(idx % 3 === 0) spawnFood(s.x, s.y); });
+        
+        if (!this.isBot) {
+            triggerGameOver();
+        } else {
+            // Respawn AI
+            Object.assign(this, new Worm(Math.random()*CONFIG.WORLD_SIZE, Math.random()*CONFIG.WORLD_SIZE, this.color, this.name, true));
+        }
+    }
+}
+
+/**
+ * LIFECYCLE CONTROLLERS
+ */
+function startGame() {
+    // UI Reset
+    document.getElementById("startScreen").style.display = "none";
+    document.getElementById("gameOverScreen").style.display = "none";
+    document.getElementById("hud").style.display = "block";
+
+    // Engine Reset
+    food = []; 
+    specialFood = []; 
+    worms = [];
+
+    // World Initialization
+    for(let i=0; i<CONFIG.MAX_FOOD; i++) spawnFood();
+    for(let i=0; i<6; i++) spawnSpecial();
+    
+    player = new Worm(CONFIG.WORLD_SIZE/2, CONFIG.WORLD_SIZE/2, "#4ae24a", "PLAYER", false);
+    worms.push(player);
+
+    for(let i=0; i<CONFIG.BOT_COUNT; i++) {
+        worms.push(new Worm(Math.random()*CONFIG.WORLD_SIZE, Math.random()*CONFIG.WORLD_SIZE, `hsl(${Math.random()*360}, 60%, 50%)`, "BOT", true));
+    }
+
+    gameRunning = true;
+}
+
+function triggerGameOver() {
+    gameRunning = false;
+    document.getElementById("finalScore").innerText = player.score;
+    document.getElementById("gameOverScreen").style.display = "flex";
+    document.getElementById("hud").style.display = "none";
+}
+
+/**
+ * ENGINE UTILS
+ */
+function spawnFood(x, y) {
+    food.push({
+        x: x || Math.random() * CONFIG.WORLD_SIZE,
+        y: y || Math.random() * CONFIG.WORLD_SIZE,
+        icon: CONFIG.FOOD_TYPES[Math.floor(Math.random() * CONFIG.FOOD_TYPES.length)]
+    });
+}
+
+function spawnSpecial() {
+    let type = CONFIG.SPECIAL_TYPES[Math.floor(Math.random() * CONFIG.SPECIAL_TYPES.length)];
+    specialFood.push({
+        x: Math.random() * CONFIG.WORLD_SIZE,
+        y: Math.random() * CONFIG.WORLD_SIZE,
+        ...type
+    });
+}
+
+function toScreen(x, y) {
+    return { x: x - camera.x + canvas.width/2, y: y - camera.y + canvas.height/2 };
+}
+
+function engineLoop() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+
+    if (gameRunning) {
+        // Camera smooth follow
+        camera.x += (player.segments[0].x - camera.x) * 0.1;
+        camera.y += (player.segments[0].y - camera.y) * 0.1;
+        
+        mouse.worldX = mouse.x - canvas.width/2 + camera.x;
+        mouse.worldY = mouse.y - canvas.height/2 + camera.y;
+
+        if (Math.random() < 0.005 && specialFood.length < 10) spawnSpecial();
+
+        worms.forEach(w => {
+            w.update();
+            let head = w.segments[0];
+            
+            // Eat Fruit
+            for (let i = food.length-1; i >= 0; i--) {
+                let f = food[i];
+                let dist = Math.hypot(head.x - f.x, head.y - f.y);
+                if (w.magnetTimer > 0 && dist < 250) {
+                    f.x += (head.x - f.x) * 0.2; f.y += (head.y - f.y) * 0.2;
+                }
+                if (dist < 35) {
+                    food.splice(i, 1);
+                    w.segments.push({...w.segments[w.segments.length-1]});
+                    w.score += 10;
+                    spawnFood();
+                }
+            }
+
+            // Eat PowerUps
+            for (let i = specialFood.length-1; i >= 0; i--) {
+                if (Math.hypot(head.x - specialFood[i].x, head.y - specialFood[i].y) < 45) {
+                    if (specialFood[i].type === 'MAGNET') w.magnetTimer = 600;
+                    if (specialFood[i].type === 'SHIELD') w.shieldTimer = 600;
+                    specialFood.splice(i, 1);
+                }
+            }
+
+            // Body Collisions
+            worms.forEach(other => {
+                if (w === other) return;
+                let headSize = 15 + (w.score / 120);
+                other.segments.forEach((seg, idx) => {
+                    if (idx > 4 && Math.hypot(head.x - seg.x, head.y - seg.y) < headSize + 5) {
+                        w.die();
+                    }
+                });
+            });
+        });
+
+        // Update HUD
+        let statusText = "";
+        if (player.magnetTimer > 0) statusText += "🧲 MAGNET ["+Math.ceil(player.magnetTimer/60)+"s] ";
+        if (player.shieldTimer > 0) statusText += "🛡️ SHIELD ["+Math.ceil(player.shieldTimer/60)+"s]";
+        document.getElementById("powerupStatus").innerText = statusText;
+        document.getElementById("score").innerText = player.score;
+    }
+
+    // Render Stage
+    ctx.fillStyle = "#121d12";
+    ctx.fillRect(0,0,canvas.width, canvas.height);
+    
+    // Draw boundary fence
+    ctx.strokeStyle = "#ff4a4a"; ctx.lineWidth = 15;
+    let b1 = toScreen(0,0); let b2 = toScreen(CONFIG.WORLD_SIZE, CONFIG.WORLD_SIZE);
+    ctx.strokeRect(b1.x, b1.y, b2.x-b1.x, b2.y-b1.y);
+
+    ctx.font = "35px Arial";
+    specialFood.forEach(sf => {
+        let pos = toScreen(sf.x, sf.y);
+        ctx.fillText(sf.icon, pos.x-15, pos.y+15);
+    });
+
+    ctx.font = "26px Arial";
+    food.forEach(f => {
+        let pos = toScreen(f.x, f.y);
+        ctx.fillText(f.icon, pos.x-13, pos.y+13);
+    });
+
+    worms.forEach(w => w.draw());
+
+    requestAnimationFrame(engineLoop);
+}
+
+// Controls
+window.addEventListener("mousemove", e => { mouse.x = e.clientX; mouse.y = e.clientY; });
+window.addEventListener("mousedown", () => mouse.down = true);
+window.addEventListener("mouseup", () => mouse.down = false);
+
+// Init
+engineLoop();
+</script>
+</body>
+</html>
